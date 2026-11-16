@@ -14,7 +14,7 @@ The prediction horizon is 36 months from baseline.
 ## 2. Dataset
 
 - Source: Alzheimer's Disease Neuroimaging Initiative (ADNI).
-- Main dataset: ADNIMERGE.
+- Main dataset: ADNIMERGE2 (Version: 0.1.4).
 - Data type: Longitudinal tabular data.
 - Observation unit: Individual participant (RID).
 - Main input groups: Demographic, genetic, cognitive, MRI-derived, CSF and PET features.

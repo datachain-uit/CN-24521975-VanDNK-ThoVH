@@ -1,112 +1,197 @@
-
-import pandas as pd
+import re
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 
 # ============================================================
-# 1. ĐỌC DỮ LIỆU
+# 1. CAU HINH VA DOC DU LIEU
 # ============================================================
 
-path = r"C:\Users\24521718\Documents\KLTN\data\selected\DXSUM.csv"
+DATA_PATH = Path(
+    r"C:\Users\24521718\Documents\KLTN\data\selected\DXSUM.csv"
+)
+HORIZONS = [24, 36, 48]
+FOLLOWUP_WINDOW_MONTHS = 3
 
-df = pd.read_csv(path, low_memory=False)
+AD_DUE_VALUE = "DEMENTIA DUE TO ALZHEIMER'S DISEASE"
+
+df = pd.read_csv(DATA_PATH, low_memory=False)
 
 required_columns = [
     "RID", "VISCODE2", "EXAMDATE", "DIAGNOSIS",
     "ORIGPROT", "DXDDUE", "DXAD"
 ]
-
-missing_columns = [
-    col for col in required_columns if col not in df.columns
-]
-
+missing_columns = [col for col in required_columns if col not in df.columns]
 if missing_columns:
-    raise ValueError(f"Thiếu các cột: {missing_columns}")
+    raise ValueError(f"Thieu cac cot bat buoc: {missing_columns}")
 
 
 # ============================================================
-# 2. CHUẨN HÓA DỮ LIỆU
+# 2. CAC HAM CHUAN HOA
 # ============================================================
 
 def clean_text(series):
+    """Chuan hoa chuoi: bo khoang trang, viet hoa, chuan hoa dau nhay."""
     return (
         series.astype("string")
         .str.strip()
         .str.upper()
-        .str.replace("’", "'", regex=False)
+        .str.replace("\u2019", "'", regex=False)
     )
 
 
 def clean_rid(value):
     if pd.isna(value):
         return pd.NA
-
     value = str(value).strip()
-
     if value.endswith(".0"):
         value = value[:-2]
-
     return value
 
 
-df["RID_KEY"] = df["RID"].apply(clean_rid)
+def visit_month(value):
+    """
+    Lay thang danh nghia tu VISCODE2:
+    bl -> 0; m36 -> 36; cac ma khong theo dang nay -> NaN.
+    """
+    if pd.isna(value):
+        return np.nan
 
+    value = str(value).strip().lower()
+
+    if value == "bl":
+        return 0
+
+    match = re.fullmatch(r"m(\d+)", value)
+    if match:
+        return int(match.group(1))
+
+    return np.nan
+
+
+def eligible_for_horizon(baseline_date, data_cutoff, horizon,
+                         window=FOLLOWUP_WINDOW_MONTHS):
+    """
+    Chi du dieu kien neu baseline + (horizon + window) thang
+    khong vuot qua ngay chot du lieu.
+    """
+    if pd.isna(baseline_date) or pd.isna(data_cutoff):
+        return False
+
+    latest_eligible_baseline = data_cutoff - pd.DateOffset(
+        months=horizon + window
+    )
+    return baseline_date <= latest_eligible_baseline
+
+
+def label_at_horizon(fu, horizon):
+    """
+    fu: cac lan kham sau baseline cua mot RID, da co:
+    M_NOM, DIAGNOSIS_CLEAN, DXDDUE_CLEAN, DXAD_CLEAN.
+
+    Chi xet su kien trong thang danh nghia <= horizon.
+    """
+    win = fu[fu["M_NOM"].notna() & (fu["M_NOM"] <= horizon)].copy()
+
+    dementia = win[
+        win["DIAGNOSIS_CLEAN"].eq("DEMENTIA")
+    ].copy()
+
+    condition_dxddue = (
+        dementia["DXDDUE_CLEAN"].eq(AD_DUE_VALUE).fillna(False)
+    )
+    condition_dxad = (
+        dementia["DXAD_CLEAN"].eq("YES").fillna(False)
+    )
+
+    ad_dementia = dementia[condition_dxddue | condition_dxad]
+
+    if not ad_dementia.empty:
+        return "pMCI"
+
+    if not dementia.empty:
+        return "Bị loại - Dementia không thỏa tiêu chí AD"
+
+    # Dung thang danh nghia, khong so sanh EXAMDATE voi moc tron.
+    observed_months = fu.loc[fu["M_NOM"].notna(), "M_NOM"]
+    if not observed_months.empty and observed_months.max() >= horizon:
+        return "sMCI"
+
+    return "Bị loại - Mất theo dõi"
+
+
+def analyze_diagnosis_sequence(states):
+    """Dem so lan doi nhan va phat hien mot nhan quay lai sau nhan khac."""
+    compressed = []
+    for state in states:
+        if not compressed or state != compressed[-1]:
+            compressed.append(state)
+
+    number_of_changes = max(len(compressed) - 1, 0)
+    is_fluctuating = (
+        len(compressed) >= 3
+        and len(set(compressed)) < len(compressed)
+    )
+    return number_of_changes, is_fluctuating, compressed
+
+
+# ============================================================
+# 3. CHUAN HOA DU LIEU VA NGAY CHOT
+# ============================================================
+
+df["RID_KEY"] = df["RID"].apply(clean_rid)
 df["VISCODE2_CLEAN"] = clean_text(df["VISCODE2"])
 df["DIAGNOSIS_CLEAN"] = clean_text(df["DIAGNOSIS"])
 df["ORIGPROT_CLEAN"] = clean_text(df["ORIGPROT"])
-
-df["ORIGPROT_CLEAN"] = (
-    df["ORIGPROT_CLEAN"].fillna("KHÔNG RÕ")
-)
-
 df["DXDDUE_CLEAN"] = clean_text(df["DXDDUE"])
 df["DXAD_CLEAN"] = clean_text(df["DXAD"])
 
-df["EXAMDATE_DT"] = pd.to_datetime(
-    df["EXAMDATE"],
-    errors="coerce"
-)
+df["ORIGPROT_CLEAN"] = df["ORIGPROT_CLEAN"].fillna("KHONG RO")
+df["EXAMDATE_DT"] = pd.to_datetime(df["EXAMDATE"], errors="coerce")
 
+# Theo QD21: thoi gian duoc tinh bang thang danh nghia tu VISCODE2.
+df["M_NOM"] = df["VISCODE2"].map(visit_month)
 
-# Giá trị DXDDUE được xác định là Dementia do Alzheimer
-AD_DUE_VALUE = "DEMENTIA DUE TO ALZHEIMER'S DISEASE"
+# Ngay chot du lieu la EXAMDATE lon nhat trong DXSUM.
+data_cutoff = df["EXAMDATE_DT"].max()
+if pd.isna(data_cutoff):
+    raise ValueError("Khong xac dinh duoc ngay chot du lieu tu EXAMDATE.")
 
-print("Các giá trị DXDDUE:")
-print(df["DXDDUE_CLEAN"].value_counts(dropna=False))
+print("Ngay chot du lieu (EXAMDATE lon nhat):", data_cutoff.date())
 
-print("\nCác giá trị DXAD:")
-print(df["DXAD_CLEAN"].value_counts(dropna=False))
+# Dem cac lan kham co VISCODE2 khong doc duoc thang danh nghia.
+unreadable_visits = df[df["M_NOM"].isna()].copy()
+print("So lan kham co VISCODE2 khong doc duoc thang:", len(unreadable_visits))
 
 
 # ============================================================
-# 3. XÁC ĐỊNH COHORT MCI TẠI BASELINE
+# 4. XAC DINH COHORT MCI TAI BASELINE
 # ============================================================
 
 baseline_mci = df[
-    (df["VISCODE2_CLEAN"] == "BL") &
-    (df["DIAGNOSIS_CLEAN"] == "MCI") &
-    (df["RID_KEY"].notna())
+    df["VISCODE2_CLEAN"].eq("BL")
+    & df["DIAGNOSIS_CLEAN"].eq("MCI")
+    & df["RID_KEY"].notna()
+    & df["ORIGPROT_CLEAN"].ne("TEAM")
 ].copy()
 
-# Kiểm tra RID trùng tại baseline
+# Kiem tra RID trung tai baseline; khong tu dong xoa dong.
 duplicated_baseline = baseline_mci[
     baseline_mci.duplicated("RID_KEY", keep=False)
 ]
 
 if not duplicated_baseline.empty:
-
+    duplicate_path = DATA_PATH.parent / "mci_baseline_duplicate_RID.csv"
     duplicated_baseline.to_csv(
-        "mci_baseline_duplicate_RID.csv",
-        index=False,
-        encoding="utf-8-sig"
+        duplicate_path, index=False, encoding="utf-8-sig"
     )
-
     raise ValueError(
-        "Có RID bị trùng tại baseline. "
-        "Hãy kiểm tra mci_baseline_duplicate_RID.csv."
+        "Co RID bi trung tai baseline. "
+        f"Hay kiem tra: {duplicate_path}"
     )
 
-# Mỗi người chỉ có một dòng trong cohort
 cohort = baseline_mci[
     ["RID_KEY", "EXAMDATE_DT", "ORIGPROT_CLEAN"]
 ].copy()
@@ -115,41 +200,40 @@ cohort = cohort.rename(columns={
     "EXAMDATE_DT": "BASELINE_DATE",
     "ORIGPROT_CLEAN": "ORIGPROT"
 })
-
 cohort["RID"] = cohort["RID_KEY"]
 
-print("\nSố người MCI baseline:", cohort["RID"].nunique())
+if cohort["BASELINE_DATE"].isna().any():
+    print(
+        "CANH BAO:",
+        int(cohort["BASELINE_DATE"].isna().sum()),
+        "nguoi co EXAMDATE baseline bi thieu; se khong du dieu kien horizon."
+    )
+
+print("So nguoi MCI baseline sau khi loai ORIGPROT=TEAM:",
+      cohort["RID"].nunique())
 
 
 # ============================================================
-# 4. LẤY DỮ LIỆU FOLLOW-UP
+# 5. LAY CAC LAN KHAM FOLLOW-UP THEO THANG DANH NGHIA
 # ============================================================
 
 followup = df.merge(
     cohort[["RID_KEY", "BASELINE_DATE"]],
     on="RID_KEY",
-    how="inner"
+    how="inner",
+    validate="many_to_one"
 )
 
-# Chỉ lấy các lần đánh giá sau baseline
-# Chỉ xét các chẩn đoán CN, MCI và Dementia
-
+# Theo huong dan: dung M_NOM > 0, khong so sanh EXAMDATE > BASELINE_DATE.
+# Chi giu cac nhan chan doan hop le de xac dinh su kien/theo doi.
 followup = followup[
-    followup["EXAMDATE_DT"].notna() &
-    followup["BASELINE_DATE"].notna() &
-    (followup["EXAMDATE_DT"] > followup["BASELINE_DATE"]) &
-    followup["DIAGNOSIS_CLEAN"].isin(
-        ["CN", "MCI", "DEMENTIA"]
-    )
+    followup["M_NOM"].notna()
+    & followup["M_NOM"].gt(0)
+    & followup["DIAGNOSIS_CLEAN"].isin(["CN", "MCI", "DEMENTIA"])
 ].copy()
 
-# Sắp xếp theo RID và ngày đánh giá
-followup = followup.sort_values(
-    ["RID_KEY", "EXAMDATE_DT"]
-)
+followup = followup.sort_values(["RID_KEY", "M_NOM", "EXAMDATE_DT"])
 
-# Lưu tất cả các bản ghi theo RID
-# Không gộp các dòng Dementia vì cần kiểm tra DXDDUE và DXAD
 followup_by_rid = {
     rid: group.reset_index(drop=True)
     for rid, group in followup.groupby("RID_KEY")
@@ -157,220 +241,127 @@ followup_by_rid = {
 
 
 # ============================================================
-# 5. HÀM KIỂM TRA CHẨN ĐOÁN DAO ĐỘNG
+# 6. PHAN LOAI pMCI / sMCI THEO HORIZON
 # ============================================================
-
-def analyze_diagnosis_sequence(states):
-
-    # Loại bỏ các nhãn liên tiếp giống nhau
-    compressed = []
-
-    for state in states:
-        if not compressed or state != compressed[-1]:
-            compressed.append(state)
-
-    # Số lần chuyển nhóm chẩn đoán
-    number_of_changes = max(len(compressed) - 1, 0)
-
-    # Có dao động nếu một nhãn xuất hiện lại
-    is_fluctuating = (
-        len(compressed) >= 3 and
-        len(set(compressed)) < len(compressed)
-    )
-
-    return number_of_changes, is_fluctuating, compressed
-
-
-# ============================================================
-# 6. PHÂN LOẠI pMCI / sMCI THEO HORIZON
-# ============================================================
-
-horizons = [24, 36, 48]
 
 result_rows = []
 
 for person in cohort.itertuples(index=False):
-
     rid = person.RID_KEY
     baseline_date = person.BASELINE_DATE
     phase = person.ORIGPROT
 
     person_followup = followup_by_rid.get(
-        rid,
-        pd.DataFrame(columns=followup.columns)
+        rid, pd.DataFrame(columns=followup.columns)
     )
 
-    # Ngày đánh giá cuối cùng
     if not person_followup.empty:
-        last_followup_date = (
-            person_followup["EXAMDATE_DT"].max()
-        )
+        last_followup_month = person_followup["M_NOM"].max()
+        last_followup_date = person_followup["EXAMDATE_DT"].max()
     else:
+        last_followup_month = np.nan
         last_followup_date = pd.NaT
 
-    for horizon in horizons:
+    for horizon in HORIZONS:
+        horizon_date = (
+            baseline_date + pd.DateOffset(months=horizon)
+            if pd.notna(baseline_date) else pd.NaT
+        )
 
-        # ----------------------------------------------------
-        # 6.1. Xác định ngày kết thúc horizon
-        # ----------------------------------------------------
+        # QD21: loc dieu kien du thoi gian truoc khi phan loai.
+        is_eligible = eligible_for_horizon(
+            baseline_date,
+            data_cutoff,
+            horizon,
+            FOLLOWUP_WINDOW_MONTHS
+        )
 
-        if pd.notna(baseline_date):
-            horizon_date = (
-                baseline_date + pd.DateOffset(months=horizon)
-            )
-        else:
-            horizon_date = pd.NaT
-
-        # Các bản ghi trong khoảng theo dõi
-        if pd.notna(horizon_date):
-
-            within_horizon = person_followup[
-                person_followup["EXAMDATE_DT"] <= horizon_date
-            ].copy()
-
-        else:
-            within_horizon = person_followup.iloc[0:0].copy()
-
-        # ----------------------------------------------------
-        # 6.2. Lấy các bản ghi Dementia
-        # ----------------------------------------------------
-
-        dementia_records = within_horizon[
-            within_horizon["DIAGNOSIS_CLEAN"] == "DEMENTIA"
+        # Cua so su kien va cac thong ke tai horizon dung thang danh nghia.
+        within_horizon = person_followup[
+            person_followup["M_NOM"].notna()
+            & (person_followup["M_NOM"] <= horizon)
         ].copy()
 
-        # ----------------------------------------------------
-        # 6.3. XÁC ĐỊNH DEMENTIA DO ALZHEIMER
-        # ----------------------------------------------------
-
-        # Điều kiện 1:
-        # DXDDUE = Dementia due to Alzheimer's Disease
+        dementia_records = within_horizon[
+            within_horizon["DIAGNOSIS_CLEAN"].eq("DEMENTIA")
+        ].copy()
 
         condition_dxddue = (
-            dementia_records["DXDDUE_CLEAN"] == AD_DUE_VALUE
+            dementia_records["DXDDUE_CLEAN"]
+            .eq(AD_DUE_VALUE).fillna(False)
         )
-
-        # Điều kiện 2:
-        # DXAD = Yes
-
         condition_dxad = (
-            dementia_records["DXAD_CLEAN"] == "YES"
+            dementia_records["DXAD_CLEAN"]
+            .eq("YES").fillna(False)
         )
 
-        # Chỉ cần thỏa mãn một trong hai điều kiện
         ad_dementia = dementia_records[
             condition_dxddue | condition_dxad
         ].copy()
 
-        # Các bản ghi Dementia không thỏa tiêu chí AD
         non_ad_criteria_dementia = dementia_records[
             ~(condition_dxddue | condition_dxad)
         ].copy()
 
         has_dementia = not dementia_records.empty
-
         has_ad_dementia = not ad_dementia.empty
-
-        has_non_ad_criteria_dementia = (
-            not non_ad_criteria_dementia.empty
-        )
-
-        # ----------------------------------------------------
-        # 6.4. XÁC ĐỊNH pMCI / sMCI / BỊ LOẠI
-        # ----------------------------------------------------
 
         first_dementia_date = (
             dementia_records["EXAMDATE_DT"].min()
             if has_dementia else pd.NaT
         )
-        
-        if has_ad_dementia:
 
-            # Có ít nhất một lần chuyển sang Dementia
-            # thỏa mãn điều kiện AD
-            outcome = "pMCI"
+        first_ad_dementia_date = (
+            ad_dementia["EXAMDATE_DT"].min()
+            if has_ad_dementia else pd.NaT
+        )
 
-            first_ad_dementia_date = (
-                ad_dementia["EXAMDATE_DT"].min()
-            )
-
-            # Lấy bản ghi AD Dementia đầu tiên
-            first_ad_record = (
-                ad_dementia
-                .sort_values("EXAMDATE_DT")
-                .iloc[0]
-            )
-
-            # Lưu bằng chứng xác định AD
-            evidence = []
-
-            dxddue_value = first_ad_record["DXDDUE_CLEAN"]
-            dxad_value = first_ad_record["DXAD_CLEAN"]
-
-            # Kiểm tra DXDDUE, bỏ qua nếu giá trị là NA
-            if (
-                pd.notna(dxddue_value)
-                and dxddue_value == AD_DUE_VALUE
-            ):
-                evidence.append("DXDDUE")
-
-            # Kiểm tra DXAD, bỏ qua nếu giá trị là NA
-            if (
-                pd.notna(dxad_value)
-                and dxad_value == "YES"
-            ):
-                evidence.append("DXAD")
-
-            ad_evidence = " + ".join(evidence)
+        # Thu tu uu tien:
+        # 1) Chua the du thoi gian theo doi -> loai truoc.
+        # 2) Neu du dieu kien: ap dung nhan tai horizon.
+        if not is_eligible:
+            outcome = "Bị loại - Chưa thể đủ thời gian"
+            ad_evidence = "Không xét do chưa đủ điều kiện horizon"
 
         else:
+            outcome = label_at_horizon(person_followup, horizon)
 
-            first_ad_dementia_date = pd.NaT
-            ad_evidence = "Không có"
-
-            if has_dementia:
-
-                # Đã chuyển sang Dementia nhưng không thỏa
-                # điều kiện xác nhận Dementia do AD
-                outcome = "Bị loại - Dementia không thỏa tiêu chí AD"
-
-            else:
-
-                # Kiểm tra có đủ dữ liệu theo dõi đến horizon
-                observed_to_horizon = (
-                    pd.notna(horizon_date) and
-                    pd.notna(last_followup_date) and
-                    last_followup_date >= horizon_date
+            # Luu bang chung tu ban ghi Dementia do AD dau tien.
+            if has_ad_dementia:
+                first_ad_record = (
+                    ad_dementia.sort_values(
+                        ["M_NOM", "EXAMDATE_DT"]
+                    ).iloc[0]
                 )
 
-                if observed_to_horizon:
-                    outcome = "sMCI"
-                else:
-                    outcome = "Bị loại - Thiếu theo dõi"
+                evidence = []
+                if (
+                    pd.notna(first_ad_record["DXDDUE_CLEAN"])
+                    and first_ad_record["DXDDUE_CLEAN"] == AD_DUE_VALUE
+                ):
+                    evidence.append("DXDDUE")
 
+                if (
+                    pd.notna(first_ad_record["DXAD_CLEAN"])
+                    and first_ad_record["DXAD_CLEAN"] == "YES"
+                ):
+                    evidence.append("DXAD")
 
-        # ----------------------------------------------------
-        # 6.5. KIỂM TRA NGƯỜI QUAY VỀ CN
-        # ----------------------------------------------------
+                ad_evidence = " + ".join(evidence)
+            else:
+                ad_evidence = "Không có"
 
+        # Ngay Dementia va bang chung chi co y nghia trong horizon.
         cn_records = within_horizon[
-            within_horizon["DIAGNOSIS_CLEAN"] == "CN"
+            within_horizon["DIAGNOSIS_CLEAN"].eq("CN")
         ]
-
         has_reverted_to_cn = not cn_records.empty
+        first_cn_date = (
+            cn_records["EXAMDATE_DT"].min()
+            if has_reverted_to_cn else pd.NaT
+        )
 
-        if has_reverted_to_cn:
-            first_cn_date = cn_records["EXAMDATE_DT"].min()
-        else:
-            first_cn_date = pd.NaT
-
-        # ----------------------------------------------------
-        # 6.6. KIỂM TRA CHẨN ĐOÁN DAO ĐỘNG
-        # ----------------------------------------------------
-
-        # Gộp theo ngày để tránh một người có nhiều dòng
-        # cùng ngày tạo ra dao động giả.
-
+        # Chan doan dao dong: giu logic cu, nhung loc theo M_NOM <= horizon.
         daily_diagnosis = (
             within_horizon
             .groupby("EXAMDATE_DT")["DIAGNOSIS_CLEAN"]
@@ -378,9 +369,9 @@ for person in cohort.itertuples(index=False):
             .reset_index(name="DIAGNOSES")
         )
 
-        # Chỉ sử dụng ngày có một chẩn đoán thống nhất
+        # Chi su dung moc thang co mot nhan chan doan duy nhat.
         daily_diagnosis = daily_diagnosis[
-            daily_diagnosis["DIAGNOSES"].apply(len) == 1
+            daily_diagnosis["DIAGNOSES"].apply(len).eq(1)
         ].copy()
 
         states = ["MCI"] + [
@@ -394,176 +385,142 @@ for person in cohort.itertuples(index=False):
 
         diagnostic_sequence = " -> ".join(states)
 
-        # ----------------------------------------------------
-        # 6.7. LƯU KẾT QUẢ
-        # ----------------------------------------------------
-
         result_rows.append({
-
             "RID": rid,
             "ORIGPROT": phase,
-
             "Horizon_months": horizon,
-
             "Baseline_date": baseline_date,
             "Horizon_date": horizon_date,
-
+            "Data_cutoff": data_cutoff,
+            "Eligible_for_horizon": is_eligible,
             "Outcome": outcome,
-
             "First_Dementia_date": first_dementia_date,
             "First_AD_Dementia_date": first_ad_dementia_date,
-
             "AD_evidence": ad_evidence,
-
             "Has_AD_Dementia": has_ad_dementia,
-
             "Number_of_Dementia_records": len(dementia_records),
-
-            "Number_of_Dementia_not_meeting_AD_criteria": (
-                len(non_ad_criteria_dementia)
-            ),
-
+            "Number_of_Dementia_not_meeting_AD_criteria":
+                len(non_ad_criteria_dementia),
+            "Last_followup_month_nominal": last_followup_month,
             "Last_followup_date": last_followup_date,
-
             "Reverted_to_CN": has_reverted_to_cn,
             "First_CN_date": first_cn_date,
-
             "Number_of_diagnosis_changes": changes,
             "Diagnosis_fluctuated": is_fluctuating,
-
             "Diagnostic_sequence": diagnostic_sequence,
             "Compressed_sequence": " -> ".join(compressed_states),
-
             "Number_of_followup_assessments": len(within_horizon)
         })
 
-
-# Tạo bảng kết quả chi tiết
 result = pd.DataFrame(result_rows)
 
 
 # ============================================================
-# 7. TỔNG HỢP KẾT QUẢ
+# 7. TONG HOP THEO HORIZON VA GIAI DOAN TUYEN
 # ============================================================
 
 def summarize_group(group):
+    total_baseline = group["RID"].nunique()
+    eligible = group.loc[
+        group["Eligible_for_horizon"], "RID"
+    ].nunique()
 
-    total = group["RID"].nunique()
-
-    pmci = (group["Outcome"] == "pMCI").sum()
-
-    smci = (group["Outcome"] == "sMCI").sum()
-
-    dementia_not_ad = (
-        group["Outcome"] ==
+    pmci = group["Outcome"].eq("pMCI").sum()
+    smci = group["Outcome"].eq("sMCI").sum()
+    dementia_not_ad = group["Outcome"].eq(
         "Bị loại - Dementia không thỏa tiêu chí AD"
     ).sum()
-
-    excluded_followup = (
-        group["Outcome"] ==
-        "Bị loại - Thiếu theo dõi"
+    too_early = group["Outcome"].eq(
+        "Bị loại - Chưa thể đủ thời gian"
+    ).sum()
+    lost_followup = group["Outcome"].eq(
+        "Bị loại - Mất theo dõi"
     ).sum()
 
     reverted = group["Reverted_to_CN"].sum()
-
     fluctuated = group["Diagnosis_fluctuated"].sum()
-
-    changed = (
-        group["Number_of_diagnosis_changes"] > 0
-    ).sum()
+    changed = group["Number_of_diagnosis_changes"].gt(0).sum()
 
     classified = pmci + smci
 
     return {
-
-        "Số MCI baseline": total,
-
-        "pMCI (Dementia do AD)": pmci,
-
+        "So_MCI_baseline": total_baseline,
+        "Du_dieu_kien_horizon": eligible,
+        "Chua_the_du_thoi_gian": too_early,
+        "pMCI": pmci,
         "sMCI": smci,
-
-        "Dementia không thỏa tiêu chí AD": dementia_not_ad,
-
-        "Bị loại do thiếu theo dõi": excluded_followup,
-
-        "Quay về CN": reverted,
-
-        "Có thay đổi chẩn đoán": changed,
-
-        "Chẩn đoán dao động": fluctuated,
-
-        "Tỷ lệ pMCI trên cohort (%)": (
-            round(pmci / total * 100, 2)
-            if total else 0
+        "Dementia_khong_thoa_tieu_chi_AD": dementia_not_ad,
+        "Mat_theo_doi": lost_followup,
+        "Quay_ve_CN": reverted,
+        "Co_thay_doi_chan_doan": changed,
+        "Chan_doan_dao_dong": fluctuated,
+        "Ty_le_pMCI_tren_nhom_du_dieu_kien_pct": (
+            round(pmci / eligible * 100, 2) if eligible else 0
         ),
-
-        "Tỷ lệ pMCI trong nhóm phân loại được (%)": (
-            round(pmci / classified * 100, 2)
-            if classified else 0
+        "Ty_le_pMCI_trong_nhom_pMCI_sMCI_pct": (
+            round(pmci / classified * 100, 2) if classified else 0
         )
     }
 
 
 summary_rows = []
 
-# Tổng hợp theo từng giai đoạn tuyển
+# Tong hop theo ORIGPROT (giai doan tuyen ban dau).
 for (horizon, phase), group in result.groupby(
-    ["Horizon_months", "ORIGPROT"],
-    dropna=False
+    ["Horizon_months", "ORIGPROT"], dropna=False
 ):
-
     row = summarize_group(group)
-
-    row["Horizon (tháng)"] = horizon
+    row["Horizon_thang"] = horizon
     row["ORIGPROT"] = phase
-
     summary_rows.append(row)
 
-
-# Tổng hợp toàn bộ cohort theo từng horizon
+# Tong hop toan bo cohort theo tung horizon.
 for horizon, group in result.groupby("Horizon_months"):
-
     row = summarize_group(group)
-
-    row["Horizon (tháng)"] = horizon
+    row["Horizon_thang"] = horizon
     row["ORIGPROT"] = "Tổng"
-
     summary_rows.append(row)
-
 
 summary = pd.DataFrame(summary_rows)
-
-summary["_total_sort"] = (
-    summary["ORIGPROT"] == "Tổng"
-).astype(int)
-
+summary["_total_sort"] = summary["ORIGPROT"].eq("Tổng").astype(int)
 summary = summary.sort_values(
-    ["Horizon (tháng)", "_total_sort", "ORIGPROT"]
+    ["Horizon_thang", "_total_sort", "ORIGPROT"]
 ).drop(columns="_total_sort")
 
 summary = summary[
     [
-        "Horizon (tháng)",
-        "ORIGPROT",
-        "Số MCI baseline",
-        "pMCI (Dementia do AD)",
-        "sMCI",
-        "Dementia không thỏa tiêu chí AD",
-        "Bị loại do thiếu theo dõi",
-        "Quay về CN",
-        "Có thay đổi chẩn đoán",
-        "Chẩn đoán dao động",
-        "Tỷ lệ pMCI trên cohort (%)",
-        "Tỷ lệ pMCI trong nhóm phân loại được (%)"
+        "Horizon_thang", "ORIGPROT",
+        "So_MCI_baseline", "Du_dieu_kien_horizon",
+        "Chua_the_du_thoi_gian", "pMCI", "sMCI",
+        "Dementia_khong_thoa_tieu_chi_AD", "Mat_theo_doi",
+        "Quay_ve_CN", "Co_thay_doi_chan_doan", "Chan_doan_dao_dong",
+        "Ty_le_pMCI_tren_nhom_du_dieu_kien_pct",
+        "Ty_le_pMCI_trong_nhom_pMCI_sMCI_pct"
     ]
 ]
 
 
 # ============================================================
-# 8. XUẤT KẾT QUẢ
+# 8. KIEM TRA VISCODE2 KHONG DOC DUOC
 # ============================================================
 
-output_dir = Path(path).parent / "mci_cohort_results"
+unreadable_summary = (
+    df[df["M_NOM"].isna()]
+    .groupby("ORIGPROT_CLEAN", dropna=False)
+    .agg(
+        So_lan_kham_khong_doc_duoc_thang=("RID_KEY", "size"),
+        So_RID=("RID_KEY", "nunique")
+    )
+    .reset_index()
+    .rename(columns={"ORIGPROT_CLEAN": "ORIGPROT"})
+)
+
+
+# ============================================================
+# 9. XUAT KET QUA CSV
+# ============================================================
+
+output_dir = DATA_PATH.parent / "mci_cohort_results"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 cohort.to_csv(
@@ -584,22 +541,38 @@ summary.to_csv(
     encoding="utf-8-sig"
 )
 
+unreadable_summary.to_csv(
+    output_dir / "mci_unreadable_VISCODE2_summary.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+unreadable_visits.to_csv(
+    output_dir / "mci_unreadable_VISCODE2_records.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
 
 # ============================================================
-# 9. HIỂN THỊ KẾT QUẢ
+# 10. HIEN THI KET QUA
 # ============================================================
 
-print("\n" + "=" * 70)
-print("COHORT MCI BASELINE")
-print("=" * 70)
+print("\n" + "=" * 80)
+print("COHORT MCI BASELINE (DA LOAI ORIGPROT=TEAM)")
+print("=" * 80)
+print("So nguoi MCI baseline:", cohort["RID"].nunique())
 
-print("Số người MCI baseline:", cohort["RID"].nunique())
-
-print("\n" + "=" * 70)
-print("PHÂN LOẠI pMCI / sMCI / BỊ LOẠI")
-print("=" * 70)
-
+print("\n" + "=" * 80)
+print("PHAN LOAI pMCI / sMCI / CAC TRUONG HOP BI LOAI")
+print("=" * 80)
 print(summary.to_string(index=False))
 
-print("\nĐã lưu kết quả tại:")
-print(output_dir)
+print("\n" + "=" * 80)
+print("SO LAN KHAM CO VISCODE2 KHONG DOC DUOC THANG")
+print("=" * 80)
+print("Tong so lan kham:", len(unreadable_visits))
+print(unreadable_summary.to_string(index=False))
+
+print("\nNgay chot du lieu:", data_cutoff.date())
+print("Da luu ket qua tai:", output_dir)

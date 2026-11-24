@@ -2,708 +2,254 @@
 # MODALITY AVAILABILITY - MCI BASELINE COHORT (ADNI)
 # ============================================================
 
-from pathlib import Path
 import numpy as np
 import pandas as pd
+
+from paths import DATA_DIR, OUT_DIR
+from modality_utils import (
+    ROI, CORE,
+    clean_string, check_required_columns, make_rid_key,
+    match_baseline_mri, mri_coverage,
+    group_flags, pattern_table, flow_table, lost_vs_labeled,
+    adsl_alignment,
+)
+
+HORIZON = 36
+MRI_WINDOW = 90
 
 # ============================================================
 # 1. PATHS
 # ============================================================
-
-BASE_DIR = Path(r"C:\Users\24521718\Documents\KLTN\data\selected")
-COH_DIR = Path(r"C:\Users\24521718\Documents\KLTN\data\selected\mci_cohort_results")
-
+COH_DIR = OUT_DIR / "mci_cohort_results"
 COHORT_PATH = COH_DIR / "mci_cohort_baseline.csv"
-ADSL_PATH = BASE_DIR / "ADSL.csv"
-MRI_PATH = BASE_DIR / "UCSFFSX7.csv"
+DETAIL_PATH = COH_DIR / "mci_horizon_classification_detail.csv"
+ADSL_PATH = DATA_DIR / "ADSL.csv"
+MRI_PATH = DATA_DIR / "UCSFFSX7.csv"
 
-OUTPUT_DIR = BASE_DIR / "modality_availability_output"
+OUTPUT_DIR = OUT_DIR / "modality_availability_output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============================================================
-# 2. GROUPS
+# 2. LOAD MCI BASELINE COHORT
 # ============================================================
-
-GROUPS = {
-    "demo_gen": [
-        "AGE", "SEX", "RACE", "ETHNIC", "EDUC", "MARISTAT", "BMI"
-    ],
-
-    "APOE": [
-        "APOE"
-    ],
-
-    "cognitive": [
-        "ADASTT11", "ADASTT13", "CDGLOBAL", "CDRSB",
-        "ECOGPTTT", "ECOGSPTT", "FAQTOTAL", "FCISCORE",
-        "GDTOTAL", "MMSCORE", "MOCA", "NPITOTAL",
-        "NPIQTOTL", "DIGITSCR", "LDELTOTL", "LIMMTOTL",
-        "RAVLTFG", "RAVLTFGP", "RAVLTIMM", "RAVLTLRN",
-        "TRABSCOR", "MPACCDIGIT", "MPACCTRAILSB"
-    ],
-
-    "AMYSTAT": [
-        "AMYSTAT"
-    ],
-
-    "MRI": [
-        "MRI_AVAILABLE"
-    ]
-}
-
-# ============================================================
-# 3. HELPER FUNCTIONS
-# ============================================================
-
-def clean_string(series):
-    """Chuẩn hóa chuỗi, giữ giá trị thiếu."""
-    return (
-        series.astype("string")
-        .str.strip()
-        .replace("", pd.NA)
-    )
-
-
-def check_required_columns(df, required, file_name):
-    """Kiểm tra các cột bắt buộc."""
-    missing = [c for c in required if c not in df.columns]
-
-    if missing:
-        raise ValueError(
-            f"{file_name} thiếu các cột bắt buộc: {missing}"
-        )
-
-
-def make_rid_key(series):
-    """Chuẩn hóa khóa RID dưới dạng chuỗi."""
-    return (
-        series.astype("string")
-        .str.strip()
-        .replace("", pd.NA)
-    )
-
-
-def group_complete_flags(df, groups):
-    """
-    Tạo flag cho từng nhóm:
-    1 = tất cả biến trong nhóm có dữ liệu
-    0 = thiếu ít nhất một biến trong nhóm
-    """
-
-    flags = pd.DataFrame(index=df.index)
-
-    for group_name, columns in groups.items():
-
-        available_columns = [
-            c for c in columns if c in df.columns
-        ]
-
-        if not available_columns:
-            raise ValueError(
-                f"Nhóm {group_name} không có cột hợp lệ "
-                f"trong bảng đầu vào."
-            )
-
-        flags[group_name] = (
-            df[available_columns]
-            .notna()
-            .all(axis=1)
-            .astype(int)
-        )
-
-    return flags
-
-
-# ============================================================
-# 4. LOAD MCI BASELINE COHORT
-# ============================================================
-
 print("=" * 60)
-print("4. LOAD MCI BASELINE COHORT")
+print("2. LOAD MCI BASELINE COHORT")
 print("=" * 60)
 
-cohort = pd.read_csv(COHORT_PATH, low_memory=False)
-
+cohort = pd.read_csv(COHORT_PATH, low_memory=False,
+                     dtype={"RID": str, "RID_KEY": str})
 print("Shape cohort:", cohort.shape)
-print("Columns:", cohort.columns.tolist())
 
-# Xác định cột RID
 if "RID_KEY" in cohort.columns:
     cohort["RID_KEY"] = make_rid_key(cohort["RID_KEY"])
-
 elif "RID" in cohort.columns:
     cohort["RID_KEY"] = make_rid_key(cohort["RID"])
-
 else:
-    raise ValueError(
-        "Cohort không có RID_KEY hoặc RID."
-    )
+    raise ValueError("Cohort không có RID_KEY hoặc RID.")
 
-check_required_columns(
-    cohort,
-    ["RID_KEY", "ORIGPROT"],
-    "Cohort"
-)
-
+check_required_columns(cohort, ["RID_KEY", "ORIGPROT", "BASELINE_DATE"], "Cohort")
 cohort["ORIGPROT"] = clean_string(cohort["ORIGPROT"])
-
+cohort["BASELINE_DATE"] = pd.to_datetime(cohort["BASELINE_DATE"], errors="coerce")
 cohort = cohort.dropna(subset=["RID_KEY"]).copy()
+cohort = cohort[cohort["ORIGPROT"].str.upper() != "TEAM"].copy()
 
-# Loại TEAM nếu còn trong cohort
-cohort = cohort[
-    cohort["ORIGPROT"].str.upper() != "TEAM"
-].copy()
-
-# Một dòng / RID
 if cohort["RID_KEY"].duplicated().any():
+    dup = cohort.loc[cohort["RID_KEY"].duplicated(keep=False), "RID_KEY"].unique()[:20].tolist()
+    raise ValueError(f"Cohort có RID trùng: {dup}")
 
-    duplicated_rids = (
-        cohort.loc[
-            cohort["RID_KEY"].duplicated(keep=False),
-            "RID_KEY"
-        ]
-        .unique()
-        .tolist()
-    )
-
-    raise ValueError(
-        "Cohort có RID trùng. Cần kiểm tra trước khi tiếp tục.\n"
-        f"RID trùng: {duplicated_rids[:20]}"
-    )
+n_no_date = int(cohort["BASELINE_DATE"].isna().sum())
+if n_no_date:
+    print(f"CẢNH BÁO: {n_no_date} người không có BASELINE_DATE (sẽ không khớp được MRI)")
 
 print("Số RID trong cohort:", cohort["RID_KEY"].nunique())
-
-print("\nSố RID theo ORIGPROT:")
 print(cohort["ORIGPROT"].value_counts(dropna=False))
 
-
 # ============================================================
-# 5. LOAD ADSL
+# 3. LOAD ADSL + KIỂM TRA KHỚP VỚI DXSUM (O14)
 # ============================================================
-
 print("\n" + "=" * 60)
-print("5. LOAD ADSL")
+print("3. LOAD ADSL + ADSL ALIGNMENT")
 print("=" * 60)
 
-adsl = pd.read_csv(ADSL_PATH, low_memory=False)
-
+adsl = pd.read_csv(ADSL_PATH, low_memory=False, dtype={"SUBJID": str})
 print("Shape ADSL:", adsl.shape)
+check_required_columns(adsl, ["SUBJID", "ORIGPROT"], "ADSL")
 
-check_required_columns(
-    adsl,
-    ["SUBJID", "ORIGPROT"],
-    "ADSL"
-)
-
-# Loại TEAM
-adsl = adsl[
-    adsl["ORIGPROT"].astype("string").str.upper() != "TEAM"
-].copy()
-
-# Chuẩn hóa khóa nối
+adsl = adsl[adsl["ORIGPROT"].astype("string").str.upper() != "TEAM"].copy()
 adsl["RID_KEY"] = make_rid_key(adsl["SUBJID"])
-
 adsl["ORIGPROT"] = clean_string(adsl["ORIGPROT"])
-
 adsl = adsl.dropna(subset=["RID_KEY"]).copy()
 
-# Kiểm tra RID trùng trong ADSL
-if adsl["RID_KEY"].duplicated().any():
+# Sửa nhánh báo trùng (Mục 7.4)
+dup = adsl["RID_KEY"].duplicated(keep=False)
+if dup.any():
+    ids = adsl.loc[dup, "RID_KEY"].unique()[:20].tolist()
+    raise ValueError(f"ADSL có SUBJID trùng: {ids}")
 
-    duplicated_rids = (
-        adsl.loc[
-            adsl["RID_KEY"].duplicated(keep=False),
-            "RID_KEY"
-        ]
-        ["RID_KEY"]
-        .unique()
-        .tolist()
-    )
+# RID của cohort không có trong ADSL (chỉ lưu trên máy)
+unmatched_adsl = cohort.loc[~cohort["RID_KEY"].isin(adsl["RID_KEY"]),
+                            ["RID_KEY", "ORIGPROT"]]
+unmatched_adsl.to_csv(OUTPUT_DIR / "unmatched_adsl.csv", index=False)
+print("Số RID không nối được ADSL:", len(unmatched_adsl))
 
-    raise ValueError(
-        "ADSL có SUBJID trùng. Không thể merge one-to-one.\n"
-        f"SUBJID trùng: {duplicated_rids[:20]}"
-    )
+# adsl_alignment chạy trên ADSL đầy đủ (trước khi giữ cột cần thiết).
+# Chỉ truyền RID_KEY, DX, ENRLDT để DX của ADSL không bị đổi tên nếu cohort
+# cũng có cột DX.
+check_required_columns(adsl, ["DX", "ENRLDT"], "ADSL")
+align = adsl_alignment(cohort, adsl[["RID_KEY", "DX", "ENRLDT"]])
 
-# Chỉ lấy những biến cần thiết
-adsl_columns = [
-    "RID_KEY",
-    "ORIGPROT"
-] + [
-    c for group in GROUPS.values()
-    for c in group
-    if c != "MRI_AVAILABLE"
-]
-
-adsl_columns = list(dict.fromkeys(adsl_columns))
-
-adsl_columns = [
-    c for c in adsl_columns
-    if c in adsl.columns
-]
-
-adsl = adsl[adsl_columns].copy()
+# Lưu các bảng đếm cho data card (số liệu tổng hợp)
+pd.crosstab(align["ORIGPROT"], align["DX"], dropna=False).to_csv(
+    OUTPUT_DIR / "adsl_dx_by_phase.csv")
+gap = (pd.to_datetime(align["ENRLDT"], errors="coerce")
+       - align["BASELINE_DATE"]).dt.days
+gap.groupby(align["ORIGPROT"]).describe(
+    percentiles=[.05, .5, .95]).round(0).to_csv(OUTPUT_DIR / "adsl_enrldt_gap_days.csv")
+n_off = int(((align["DX"].astype("string").str.upper() != "MCI") | (gap.abs() > 90)).sum())
+print(f"Người có DX ADSL khác MCI hoặc lệch ENRLDT > 90 ngày: {n_off} "
+      "(báo cáo riêng, chưa loại)")
 
 # ============================================================
-# 6. MERGE COHORT WITH ADSL
+# 4. BIẾN BASELINE TỪ ADSL (QĐ25)
 # ============================================================
-
 print("\n" + "=" * 60)
-print("6. MERGE COHORT WITH ADSL")
+print("4. ADSL FEATURES (CORE)")
 print("=" * 60)
 
-# Các biến modality cần lấy từ ADSL
-adsl_modality_columns = [
-    c for group, columns in GROUPS.items()
-    if group != "MRI"
-    for c in columns
-]
+# APOE4: số alen ε4 từ kiểu gen ("ε3/ε4" -> 1). Kiểm tra định dạng APOE.
+check_required_columns(adsl, ["APOE"], "ADSL")
+print("Mẫu giá trị APOE:", adsl["APOE"].dropna().astype(str).unique()[:6].tolist())
+adsl["APOE4"] = adsl["APOE"].astype("string").str.count("4")
 
-adsl_modality_columns = list(dict.fromkeys(
-    adsl_modality_columns
-))
-
-# Chỉ lấy những cột modality thực sự có trong ADSL
-adsl_modality_columns = [
-    c for c in adsl_modality_columns
-    if c in adsl.columns
-]
-
-# Loại những cột modality trùng tên trong cohort,
-# để dữ liệu từ ADSL không bị đổi tên thành hậu tố _ADSL
-overlap_columns = [
-    c for c in adsl_modality_columns
-    if c in cohort.columns
-]
-
-print("Các cột modality trùng trong cohort:")
-print(overlap_columns)
-
-cohort_merge = cohort.drop(
-    columns=overlap_columns,
-    errors="ignore"
-).copy()
-
-# Merge
-bl = cohort_merge.merge(
-    adsl,
-    on="RID_KEY",
-    how="left",
-    suffixes=("", "_ADSL"),
-    validate="one_to_one",
-    indicator=True
-)
-
-print("Shape sau merge:", bl.shape)
-
-print("\nKết quả merge:")
-print(bl["_merge"].value_counts())
-
-# Xuất RID không nối được
-unmatched_adsl = bl.loc[
-    bl["_merge"] == "left_only",
-    ["RID_KEY", "ORIGPROT"]
-].copy()
-
-unmatched_adsl.to_csv(
-    OUTPUT_DIR / "unmatched_adsl.csv",
-    index=False
-)
-
-print(
-    "Số RID không nối được ADSL:",
-    len(unmatched_adsl)
-)
-
-bl.drop(columns="_merge", inplace=True)
+adsl_vars = [c for g, cols in CORE.items() if g != "mri" for c in cols]
+check_required_columns(adsl, [c for c in adsl_vars if c != "APOE4"], "ADSL (nhóm lõi)")
+adsl_keep = ["RID_KEY", "ORIGPROT"] + list(dict.fromkeys(adsl_vars))
+adsl = adsl[adsl_keep].copy()
 
 # ============================================================
-# 7. LOAD UCSFFSX7 - MRI
+# 5. MRI BASELINE: KHỚP THEO CỬA SỔ NGÀY (R5, QĐ24)
 # ============================================================
-
 print("\n" + "=" * 60)
-print("7. LOAD UCSFFSX7")
+print("5. MRI BASELINE (UCSFFSX7)")
 print("=" * 60)
 
-mri = pd.read_csv(MRI_PATH, low_memory=False)
-
+mri = pd.read_csv(MRI_PATH, dtype=str)
 print("Shape UCSFFSX7:", mri.shape)
-
 check_required_columns(
-    mri,
-    ["RID", "ORIGPROT"],
-    "UCSFFSX7"
-)
-
-# Chuẩn hóa RID
+    mri, ["RID", "IMAGEUID", "EXAMDATE", "OVERALLQC", "FIELD_STRENGTH",
+          "STATUS", "VISCODE2"] + list(ROI), "UCSFFSX7")
 mri["RID_KEY"] = make_rid_key(mri["RID"])
 
-# Chuẩn hóa protocol
-mri["ORIGPROT"] = clean_string(mri["ORIGPROT"])
+matched = match_baseline_mri(cohort, mri, window=MRI_WINDOW)
+print("Số RID khớp được MRI baseline:", matched["RID_KEY"].nunique())
 
-# Loại TEAM
-mri = mri[
-    mri["ORIGPROT"].str.upper() != "TEAM"
-].copy()
+# Chẩn đoán: ảnh 'Hippocampus Only' có ICV không?
+hip_only = matched["OVERALLQC"].astype("string").str.upper().eq("HIPPOCAMPUS ONLY")
+print("Ảnh Hippocampus Only:", int(hip_only.sum()),
+      "| trong đó thiếu MRI_ICV:", int((hip_only & matched["MRI_ICV"].isna()).sum()))
+print("Ảnh có HIPPO đủ nhưng thiếu MRI_ICV (sẽ bị tính là 'thiếu' ở nhóm mri):",
+      int((matched["MRI_HIPPO_L"].notna() & matched["MRI_HIPPO_R"].notna()
+           & matched["MRI_ICV"].isna()).sum()))
+
+matched.to_csv(OUTPUT_DIR / "mri_baseline_records.csv", index=False)  # chỉ trên máy
+
+feats = adsl.merge(matched, on="RID_KEY", how="left", validate="one_to_one")
 
 # ============================================================
-# 8. IDENTIFY BASELINE MRI
+# 6. BẢNG BASELINE ĐẦY ĐỦ (chỉ trên máy)
 # ============================================================
+overlap = [c for c in feats.columns if c in cohort.columns and c != "RID_KEY"]
+bl = cohort.drop(columns=overlap, errors="ignore").merge(
+    feats.drop(columns="ORIGPROT"), on="RID_KEY", how="left", validate="one_to_one")
+bl.to_csv(OUTPUT_DIR / "mci_baseline_with_modalities.csv", index=False)
+print("\nShape bảng baseline:", bl.shape)
 
+# ============================================================
+# 7. COHORT PHÂN TÍCH Ở H = 36 (QĐ26, QĐ27)
+# ============================================================
 print("\n" + "=" * 60)
-print("8. IDENTIFY BASELINE MRI")
+print(f"7. COHORT PHÂN TÍCH H = {HORIZON}")
 print("=" * 60)
 
-# Kiểm tra các cột visit code
-visit_columns = [
-    c for c in ["VISCODE2", "VISCODE"]
-    if c in mri.columns
-]
+res = pd.read_csv(DETAIL_PATH, dtype={"RID": str})
+res36 = res[res["Horizon_months"] == HORIZON].rename(columns={"RID": "RID_KEY"}).copy()
+res36["RID_KEY"] = make_rid_key(res36["RID_KEY"])
 
-if not visit_columns:
-    raise ValueError(
-        "UCSFFSX7 không có VISCODE2 hoặc VISCODE."
-    )
+flow = flow_table(res36, feats)
+print(flow)
+flow.to_csv(OUTPUT_DIR / "flow_table.csv")
 
-# Chuẩn hóa mã lần khám
-for c in visit_columns:
-    mri[c] = clean_string(mri[c])
+lab = res36[res36["Outcome"].isin(["pMCI", "sMCI"])]
+lab = lab.merge(feats.drop(columns="ORIGPROT"), on="RID_KEY", how="left")
+lab["SPLIT"] = np.where(lab["ORIGPROT"].eq("ADNI1"), "train", "test")
+print("\nSố người có nhãn:", len(lab))
+print(lab["SPLIT"].value_counts())
 
-# Xác định baseline:
-# ưu tiên VISCODE2 nếu có.
-# nếu VISCODE2 thiếu ở một dòng thì dùng VISCODE.
-if "VISCODE2" in mri.columns:
+# 7.1 Mức sẵn có theo nhóm lõi (theo giai đoạn và theo train/test)
+def availability_table(df, by):
+    f = group_flags(df)
+    f[by] = df[by].values
+    out = f.groupby(by).mean().round(3)
+    out["n"] = f.groupby(by).size()
+    return out
 
-    baseline_mask = mri["VISCODE2"].str.upper().eq("BL")
+avail_phase = availability_table(lab, "ORIGPROT")
+avail_split = availability_table(lab, "SPLIT")
+print("\nMức sẵn có theo giai đoạn:\n", avail_phase)
+print("\nMức sẵn có theo train/test:\n", avail_split)
+avail_phase.to_csv(OUTPUT_DIR / "availability_by_phase.csv")
+avail_split.to_csv(OUTPUT_DIR / "availability_by_split.csv")
 
-    if "VISCODE" in mri.columns:
+# 7.2 Mức sẵn có theo từng biến (nhóm mri gồm đủ 7 ROI)
+var_groups = dict(CORE)
+var_groups["mri"] = ["MRI_" + v for v in ROI.values()]
 
-        baseline_mask = baseline_mask | (
-            mri["VISCODE2"].isna()
-            & mri["VISCODE"].str.upper().eq("BL")
-        )
+def per_variable_availability(df, by, groups):
+    rows = []
+    for g, cols in groups.items():
+        for c in cols:
+            for key, sub in df.groupby(by):
+                n, a = len(sub), int(sub[c].notna().sum())
+                rows.append({by: key, "Group": g, "Variable": c, "N": n,
+                             "N_available": a, "N_missing": n - a,
+                             "Availability_percent": round(a / n * 100, 2)})
+    return pd.DataFrame(rows)
 
-else:
+per_variable_availability(lab, "ORIGPROT", var_groups).to_csv(
+    OUTPUT_DIR / "per_variable_availability_by_phase.csv", index=False)
+per_variable_availability(lab, "SPLIT", var_groups).to_csv(
+    OUTPUT_DIR / "per_variable_availability_by_split.csv", index=False)
 
-    baseline_mask = mri["VISCODE"].str.upper().eq("BL")
+# 7.3 Mẫu khuyết dạng cột (không mất số 0 đầu)
+pat_phase = pattern_table(lab)
+pat_split = pattern_table(lab, by="SPLIT")
+print("\nMẫu khuyết theo giai đoạn:\n", pat_phase)
+pat_phase.to_csv(OUTPUT_DIR / "missing_patterns_by_phase.csv", index=False)
+pat_split.to_csv(OUTPUT_DIR / "missing_patterns_by_split.csv", index=False)
 
+# 7.4 Bảng MRI của QĐ24 (cohort đầy đủ và cohort phân tích)
+cohort_lab = cohort[cohort["RID_KEY"].isin(lab["RID_KEY"])]
+for tag, coh in [("all_mci", cohort), ("analysis_h36", cohort_lab)]:
+    cov, fs, st, vc = mri_coverage(coh, matched)
+    print(f"\nMRI coverage ({tag}):\n", cov)
+    cov.to_csv(OUTPUT_DIR / f"mri_coverage_{tag}.csv")
+    fs.to_csv(OUTPUT_DIR / f"mri_field_strength_{tag}.csv")
+    st.to_csv(OUTPUT_DIR / f"mri_status_{tag}.csv")
+    vc.to_csv(OUTPUT_DIR / f"mri_viscode2_{tag}.csv")
 
-mri_bl = mri.loc[baseline_mask].copy()
-
-print("Số dòng MRI baseline:", len(mri_bl))
+# 7.5 Nhóm mất theo dõi so với nhóm có nhãn (O16)
+smd = lost_vs_labeled(res36, feats)
+print("\nSMD (mất theo dõi vs có nhãn):\n", smd)
+smd.to_csv(OUTPUT_DIR / "smd_lost_vs_labeled.csv", index=False)
+print("Các dòng |SMD| >= 0,2:")
+print(smd[smd["SMD"].abs() >= 0.2])
 
 # ============================================================
-# 9. IDENTIFY MRI RECORD AVAILABILITY
+# 8. SUMMARY
 # ============================================================
-
-# Chỉ xác định RID có bản ghi MRI baseline.
-# Nếu IMAGEUID tồn tại, yêu cầu IMAGEUID không thiếu.
-# Không áp dụng OVERALLQC ở thống kê chính này.
-
-if "IMAGEUID" in mri_bl.columns:
-
-    mri_bl = mri_bl.dropna(subset=["IMAGEUID"]).copy()
-
-# RID có MRI baseline
-mri_rids = (
-    mri_bl[["RID_KEY"]]
-    .dropna()
-    .drop_duplicates()
-)
-
-mri_rids["MRI_AVAILABLE"] = 1
-
-print(
-    "Số RID có MRI baseline trong UCSFFSX7:",
-    mri_rids["RID_KEY"].nunique()
-)
-
-# Xuất danh sách MRI baseline
-mri_bl.to_csv(
-    OUTPUT_DIR / "mri_baseline_records.csv",
-    index=False
-)
-
-# ============================================================
-# 10. MERGE MRI AVAILABILITY INTO COHORT
-# ============================================================
-
 print("\n" + "=" * 60)
-print("10. MERGE MRI AVAILABILITY")
+print("8. SUMMARY")
 print("=" * 60)
-
-bl = bl.merge(
-    mri_rids,
-    on="RID_KEY",
-    how="left",
-    validate="one_to_one"
-)
-
-bl["MRI_AVAILABLE"] = (
-    bl["MRI_AVAILABLE"]
-    .fillna(0)
-    .astype(int)
-)
-
-print("Số RID có MRI baseline trong cohort:")
-
-print(
-    bl.groupby("ORIGPROT")["MRI_AVAILABLE"]
-    .sum()
-)
-
-# ============================================================
-# 11. DEFINE GROUPS AVAILABLE IN THE FINAL TABLE
-# ============================================================
-
-# Kiểm tra nhóm biến ADSL có tồn tại
-groups_final = {}
-
-for group_name, columns in GROUPS.items():
-
-    if group_name == "MRI":
-
-        groups_final[group_name] = [
-            "MRI_AVAILABLE"
-        ]
-
-    else:
-
-        available_columns = [
-            c for c in columns if c in bl.columns
-        ]
-
-        if not available_columns:
-
-            raise ValueError(
-                f"Không tìm thấy biến nào của nhóm "
-                f"{group_name}."
-            )
-
-        groups_final[group_name] = available_columns
-
-
-print("\nCác nhóm biến sử dụng:")
-
-for group_name, columns in groups_final.items():
-
-    print(f"\n{group_name}:")
-    print(columns)
-
-# ============================================================
-# 12. AVAILABILITY BY PHASE
-# ============================================================
-
-def availability_by_phase(bl):
-    out = {}
-
-    for g, cols in GROUPS.items():
-        cols = [c for c in cols if c in bl.columns]
-
-        if g == "MRI":
-            out[g] = (
-                bl["MRI_AVAILABLE"].eq(1)
-                .groupby(bl["ORIGPROT"])
-                .mean()
-            )
-        else:
-            out[g] = (
-                bl[cols].notna().all(axis=1)
-                .groupby(bl["ORIGPROT"])
-                .mean()
-            )
-
-    out["n"] = bl.groupby("ORIGPROT").size()
-
-    return pd.DataFrame(out).round(3)
-
-
-availability = availability_by_phase(bl)
-
-print("\n" + "=" * 60)
-print("12. AVAILABILITY BY PHASE")
-print("=" * 60)
-
-print(availability)
-
-availability.to_csv(
-    OUTPUT_DIR / "availability_by_phase.csv"
-)
-
-# ============================================================
-# 13. MISSING PATTERNS
-# ============================================================
-
-def missing_patterns(bl: pd.DataFrame, top: int = 10) -> pd.Series:
-
-    """
-    Các missing patterns phổ biến.
-
-    1 = đủ toàn bộ biến trong nhóm
-    0 = thiếu ít nhất một biến trong nhóm
-    """
-
-    flags = group_complete_flags(
-        bl,
-        groups_final
-    )
-
-    # Chuỗi 0/1 cho từng RID
-    patterns = (
-        flags.astype(str)
-        .agg("".join, axis=1)
-    )
-
-    return patterns.value_counts().head(top)
-
-
-patterns = missing_patterns(bl, top=20)
-
-print("\n" + "=" * 60)
-print("13. MISSING PATTERNS")
-print("=" * 60)
-
-print(patterns)
-
-patterns.to_csv(
-    OUTPUT_DIR / "missing_patterns.csv",
-    header=["count"]
-)
-
-# ============================================================
-# 14. MISSING PATTERNS BY PHASE
-# ============================================================
-
-flags = group_complete_flags(
-    bl,
-    groups_final
-)
-
-# Thêm ORIGPROT để phân nhóm
-flags["ORIGPROT"] = bl["ORIGPROT"].values
-
-patterns_by_phase = (
-    flags.groupby("ORIGPROT")
-    .apply(
-        lambda x: (
-            x.astype(str)
-            .agg("".join, axis=1)
-            .value_counts()
-        ),
-        include_groups=False
-    )
-)
-
-print("\n" + "=" * 60)
-print("14. MISSING PATTERNS BY PHASE")
-print("=" * 60)
-
-print(patterns_by_phase)
-
-patterns_by_phase.to_csv(
-    OUTPUT_DIR / "missing_patterns_by_phase.csv"
-)
-
-# ============================================================
-# 15. PER-VARIABLE AVAILABILITY
-# ============================================================
-
-print("\n" + "=" * 60)
-print("15. PER-VARIABLE AVAILABILITY")
-print("=" * 60)
-
-variable_rows = []
-
-for group_name, columns in groups_final.items():
-
-    for column in columns:
-
-        if column not in bl.columns:
-            continue
-
-        for phase, sub in bl.groupby("ORIGPROT"):
-
-            n_total = len(sub)
-
-            n_available = sub[column].notna().sum()
-
-            n_missing = n_total - n_available
-
-            percentage = (
-                n_available / n_total * 100
-                if n_total > 0
-                else np.nan
-            )
-
-            variable_rows.append({
-
-                "ORIGPROT": phase,
-
-                "Group": group_name,
-
-                "Variable": column,
-
-                "N_cohort": n_total,
-
-                "N_available": n_available,
-
-                "N_missing": n_missing,
-
-                "Availability_percent": round(
-                    percentage, 2
-                )
-
-            })
-
-
-variable_availability = pd.DataFrame(
-    variable_rows
-)
-
-print(variable_availability)
-
-variable_availability.to_csv(
-    OUTPUT_DIR / "per_variable_availability.csv",
-    index=False
-)
-
-# ============================================================
-# 16. EXPORT FINAL BASELINE TABLE
-# ============================================================
-
-bl.to_csv(
-    OUTPUT_DIR / "mci_baseline_with_modalities.csv",
-    index=False
-)
-
-# ============================================================
-# 17. SUMMARY
-# ============================================================
-
-print("\n" + "=" * 60)
-print("17. SUMMARY")
-print("=" * 60)
-
-print("Số RID:", bl["RID_KEY"].nunique())
-
-print("\nSố RID theo ORIGPROT:")
-
-print(
-    bl["ORIGPROT"]
-    .value_counts(dropna=False)
-)
-
-print("\nAvailability by phase:")
-
-print(availability)
-
-print("\nMissing patterns:")
-
-print(patterns)
-
-print("\nĐã hoàn thành.")
-
-print(
-    "Các file kết quả được lưu tại:",
-    OUTPUT_DIR
-)
+print("Số RID MCI baseline:", bl["RID_KEY"].nunique())
+print("Số người có nhãn H=36:", len(lab))
+print("Đã hoàn thành. Kết quả tại:", OUTPUT_DIR)

@@ -89,7 +89,7 @@ if dup.any():
 # RID của cohort không có trong ADSL (chỉ lưu trên máy)
 unmatched_adsl = cohort.loc[~cohort["RID_KEY"].isin(adsl["RID_KEY"]),
                             ["RID_KEY", "ORIGPROT"]]
-unmatched_adsl.to_csv(OUTPUT_DIR / "unmatched_adsl.csv", index=False)
+unmatched_adsl.to_csv(OUTPUT_DIR / "unmatched_adsl.csv", index=False, encoding="utf-8-sig")
 print("Số RID không nối được ADSL:", len(unmatched_adsl))
 
 # adsl_alignment chạy trên ADSL đầy đủ (trước khi giữ cột cần thiết).
@@ -100,11 +100,11 @@ align = adsl_alignment(cohort, adsl[["RID_KEY", "DX", "ENRLDT"]])
 
 # Lưu các bảng đếm cho data card (số liệu tổng hợp)
 pd.crosstab(align["ORIGPROT"], align["DX"], dropna=False).to_csv(
-    OUTPUT_DIR / "adsl_dx_by_phase.csv")
+    OUTPUT_DIR / "adsl_dx_by_phase.csv", encoding="utf-8-sig")
 gap = (pd.to_datetime(align["ENRLDT"], errors="coerce")
        - align["BASELINE_DATE"]).dt.days
 gap.groupby(align["ORIGPROT"]).describe(
-    percentiles=[.05, .5, .95]).round(0).to_csv(OUTPUT_DIR / "adsl_enrldt_gap_days.csv")
+    percentiles=[.05, .5, .95]).round(0).to_csv(OUTPUT_DIR / "adsl_enrldt_gap_days.csv", encoding="utf-8-sig")
 n_off = int(((align["DX"].astype("string").str.upper() != "MCI") | (gap.abs() > 90)).sum())
 print(f"Người có DX ADSL khác MCI hoặc lệch ENRLDT > 90 ngày: {n_off} "
       "(báo cáo riêng, chưa loại)")
@@ -151,7 +151,7 @@ print("Ảnh có HIPPO đủ nhưng thiếu MRI_ICV (sẽ bị tính là 'thiế
       int((matched["MRI_HIPPO_L"].notna() & matched["MRI_HIPPO_R"].notna()
            & matched["MRI_ICV"].isna()).sum()))
 
-matched.to_csv(OUTPUT_DIR / "mri_baseline_records.csv", index=False)  # chỉ trên máy
+matched.to_csv(OUTPUT_DIR / "mri_baseline_records.csv", index=False, encoding="utf-8-sig")  # chỉ trên máy
 
 feats = adsl.merge(matched, on="RID_KEY", how="left", validate="one_to_one")
 
@@ -161,7 +161,7 @@ feats = adsl.merge(matched, on="RID_KEY", how="left", validate="one_to_one")
 overlap = [c for c in feats.columns if c in cohort.columns and c != "RID_KEY"]
 bl = cohort.drop(columns=overlap, errors="ignore").merge(
     feats.drop(columns="ORIGPROT"), on="RID_KEY", how="left", validate="one_to_one")
-bl.to_csv(OUTPUT_DIR / "mci_baseline_with_modalities.csv", index=False)
+bl.to_csv(OUTPUT_DIR / "mci_baseline_with_modalities.csv", index=False, encoding="utf-8-sig")
 print("\nShape bảng baseline:", bl.shape)
 
 # ============================================================
@@ -177,7 +177,7 @@ res36["RID_KEY"] = make_rid_key(res36["RID_KEY"])
 
 flow = flow_table(res36, feats)
 print(flow)
-flow.to_csv(OUTPUT_DIR / "flow_table.csv")
+flow.to_csv(OUTPUT_DIR / "flow_table.csv", encoding="utf-8-sig")
 
 lab = res36[res36["Outcome"].isin(["pMCI", "sMCI"])]
 lab = lab.merge(feats.drop(columns="ORIGPROT"), on="RID_KEY", how="left")
@@ -197,8 +197,8 @@ avail_phase = availability_table(lab, "ORIGPROT")
 avail_split = availability_table(lab, "SPLIT")
 print("\nMức sẵn có theo giai đoạn:\n", avail_phase)
 print("\nMức sẵn có theo train/test:\n", avail_split)
-avail_phase.to_csv(OUTPUT_DIR / "availability_by_phase.csv")
-avail_split.to_csv(OUTPUT_DIR / "availability_by_split.csv")
+avail_phase.to_csv(OUTPUT_DIR / "availability_by_phase.csv", encoding="utf-8-sig")
+avail_split.to_csv(OUTPUT_DIR / "availability_by_split.csv", encoding="utf-8-sig")
 
 # 7.2 Mức sẵn có theo từng biến (nhóm mri gồm đủ 7 ROI)
 var_groups = dict(CORE)
@@ -216,31 +216,31 @@ def per_variable_availability(df, by, groups):
     return pd.DataFrame(rows)
 
 per_variable_availability(lab, "ORIGPROT", var_groups).to_csv(
-    OUTPUT_DIR / "per_variable_availability_by_phase.csv", index=False)
+    OUTPUT_DIR / "per_variable_availability_by_phase.csv", index=False, encoding="utf-8-sig")
 per_variable_availability(lab, "SPLIT", var_groups).to_csv(
-    OUTPUT_DIR / "per_variable_availability_by_split.csv", index=False)
+    OUTPUT_DIR / "per_variable_availability_by_split.csv", index=False, encoding="utf-8-sig")
 
 # 7.3 Mẫu khuyết dạng cột (không mất số 0 đầu)
 pat_phase = pattern_table(lab)
 pat_split = pattern_table(lab, by="SPLIT")
 print("\nMẫu khuyết theo giai đoạn:\n", pat_phase)
-pat_phase.to_csv(OUTPUT_DIR / "missing_patterns_by_phase.csv", index=False)
-pat_split.to_csv(OUTPUT_DIR / "missing_patterns_by_split.csv", index=False)
+pat_phase.to_csv(OUTPUT_DIR / "missing_patterns_by_phase.csv", index=False, encoding="utf-8-sig")
+pat_split.to_csv(OUTPUT_DIR / "missing_patterns_by_split.csv", index=False, encoding="utf-8-sig")
 
 # 7.4 Bảng MRI của QĐ24 (cohort đầy đủ và cohort phân tích)
 cohort_lab = cohort[cohort["RID_KEY"].isin(lab["RID_KEY"])]
 for tag, coh in [("all_mci", cohort), ("analysis_h36", cohort_lab)]:
     cov, fs, st, vc = mri_coverage(coh, matched)
     print(f"\nMRI coverage ({tag}):\n", cov)
-    cov.to_csv(OUTPUT_DIR / f"mri_coverage_{tag}.csv")
-    fs.to_csv(OUTPUT_DIR / f"mri_field_strength_{tag}.csv")
-    st.to_csv(OUTPUT_DIR / f"mri_status_{tag}.csv")
-    vc.to_csv(OUTPUT_DIR / f"mri_viscode2_{tag}.csv")
+    cov.to_csv(OUTPUT_DIR / f"mri_coverage_{tag}.csv", encoding="utf-8-sig")
+    fs.to_csv(OUTPUT_DIR / f"mri_field_strength_{tag}.csv", encoding="utf-8-sig")
+    st.to_csv(OUTPUT_DIR / f"mri_status_{tag}.csv", encoding="utf-8-sig")
+    vc.to_csv(OUTPUT_DIR / f"mri_viscode2_{tag}.csv", encoding="utf-8-sig")
 
 # 7.5 Nhóm mất theo dõi so với nhóm có nhãn (O16)
 smd = lost_vs_labeled(res36, feats)
 print("\nSMD (mất theo dõi vs có nhãn):\n", smd)
-smd.to_csv(OUTPUT_DIR / "smd_lost_vs_labeled.csv", index=False)
+smd.to_csv(OUTPUT_DIR / "smd_lost_vs_labeled.csv", index=False, encoding="utf-8-sig")
 print("Các dòng |SMD| >= 0,2:")
 print(smd[smd["SMD"].abs() >= 0.2])
 

@@ -6,6 +6,8 @@ data/
 *.RData
 *.tar.gz
 *.zip
+*.rda
+*.rds
 
 # Python
 __pycache__/
@@ -30,3 +32,9 @@ Thumbs.db
 
 # Environment variables
 .env
+
+
+*.xlsx
+outputs/
+modality_availability_output/
+mci_cohort_results/

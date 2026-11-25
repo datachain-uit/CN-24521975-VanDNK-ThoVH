@@ -1,15 +1,9 @@
-"""Hàm dùng chung cho modality_availability.py.
-Các hàm match_baseline_mri, mri_coverage, group_flags, pattern_table,
-flow_table, lost_vs_labeled, adsl_alignment lấy từ Review-2026-11-22
-(Mục 7.2-7.4). Các hàm phụ trợ (clean_string, check_required_columns,
-make_rid_key) lấy từ modality_availability.py cũ của nhóm."""
-
 import numpy as np
 import pandas as pd
 
 
 # ---------------------------------------------------------------
-# Hàm phụ trợ (từ code cũ của nhóm)
+# Hàm phụ trợ 
 # ---------------------------------------------------------------
 def clean_string(series):
     """Chuẩn hóa chuỗi, giữ giá trị thiếu."""

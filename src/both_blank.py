@@ -1,7 +1,7 @@
 import pandas as pd
-
+from paths import DATA_DIR, OUT_DIR
 # 1. Đọc dữ liệu DXSUM
-path = r"C:\Users\24521718\Documents\KLTN\data\selected\DXSUM.csv"
+path = DATA_DIR / "DXSUM.csv"
 df = pd.read_csv(path, low_memory=False)
 
 # 2. Kiểm tra các cột cần thiết
@@ -88,7 +88,7 @@ print("\nTHỐNG KÊ BẢN GHI DEMENTIA THIẾU CẢ DXDDUE VÀ DXAD")
 print(result.to_string(index=False))
 # 11. Xuất kết quả CSV
 result.to_csv(
-    "dementia_missing_DXDDUE_DXAD_by_COLPROT.csv",
+    OUT_DIR / "dementia_missing_DXDDUE_DXAD_by_COLPROT.csv",
     index=False,
     encoding="utf-8-sig"
 )

@@ -1,4 +1,3 @@
-# src/paths.py: lấy đường dẫn từ biến môi trường, không viết cứng trong mã
 import os
 from pathlib import Path
 

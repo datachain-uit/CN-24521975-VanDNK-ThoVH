@@ -1,17 +1,20 @@
+# ============================================================
+# COHORT MCI BASELINE
+# ============================================================
 import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from paths import DATA_DIR, OUT_DIR
 
 # ============================================================
 # 1. CAU HINH VA DOC DU LIEU
 # ============================================================
 
-DATA_PATH = Path(
-    r"C:\Users\24521718\Documents\KLTN\data\selected\DXSUM.csv"
-)
+DATA_PATH = DATA_DIR / "DXSUM.csv"
+
 HORIZONS = [24, 36, 48]
 FOLLOWUP_WINDOW_MONTHS = 3
 
@@ -183,7 +186,7 @@ duplicated_baseline = baseline_mci[
 ]
 
 if not duplicated_baseline.empty:
-    duplicate_path = DATA_PATH.parent / "mci_baseline_duplicate_RID.csv"
+    duplicate_path = OUT_DIR / "mci_baseline_duplicate_RID.csv"
     duplicated_baseline.to_csv(
         duplicate_path, index=False, encoding="utf-8-sig"
     )
@@ -520,7 +523,7 @@ unreadable_summary = (
 # 9. XUAT KET QUA CSV
 # ============================================================
 
-output_dir = DATA_PATH.parent / "mci_cohort_results"
+output_dir = OUT_DIR / "mci_cohort_results"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 cohort.to_csv(

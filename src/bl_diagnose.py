@@ -1,11 +1,10 @@
 
 import pandas as pd
-
+from paths import DATA_DIR, OUT_DIR
 # ==========================================
 # 1. ĐỌC DỮ LIỆU
 # ==========================================
-path = r"C:\Users\24521718\Documents\KLTN\data\selected\DXSUM.csv"
-
+path = DATA_DIR / "DXSUM.csv"
 df = pd.read_csv(path, low_memory=False)
 
 # Các cột cần sử dụng

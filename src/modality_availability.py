@@ -158,7 +158,8 @@ feats = adsl.merge(matched, on="RID_KEY", how="left", validate="one_to_one")
 # ============================================================
 # 6. BẢNG BASELINE ĐẦY ĐỦ (chỉ trên máy)
 # ============================================================
-overlap = [c for c in feats.columns if c in cohort.columns and c != "RID_KEY"]
+overlap = [c for c in feats.columns
+           if c in cohort.columns and c not in ("RID_KEY", "ORIGPROT")]
 bl = cohort.drop(columns=overlap, errors="ignore").merge(
     feats.drop(columns="ORIGPROT"), on="RID_KEY", how="left", validate="one_to_one")
 bl.to_csv(OUTPUT_DIR / "mci_baseline_with_modalities.csv", index=False, encoding="utf-8-sig")

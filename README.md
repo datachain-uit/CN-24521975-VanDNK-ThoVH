@@ -22,10 +22,13 @@ The prediction horizon is 36 months from baseline.
 Raw ADNI data are stored locally and are not included in this repository.
 
 ## 3. Repository Structure
-
-- `src/cohort.py`: MCI cohort construction and validation. (paths.py, modality_utils.py, cohort_MCI_bl.py, modality_availability.py, bl_diagnose.py, both_blank.py)
-- `notebooks/01_datacard.ipynb`: Initial dataset inspection and Data Card generation.
-- `reports/`: Aggregated statistics and research summaries.
+- `src/`:
+- `paths.py`
+-` modality_utils.py`
+`- cohort_MCI_bl.py`
+- `modality_availability.py`
+- `bl_diagnose.py`
+- `both_blank.py`
 - `data/`: Local data directory (excluded from Git).
 
 ## 4. Installation
@@ -40,7 +43,7 @@ pip install -r requirements.txt
 
 1. Obtain authorized access to ADNI.
 2. Download ADNIMERGE and its data dictionary.
-3. Place the dataset in `ADNI_DATA_DIR`.
+3. Place the dataset in `ADNI_DATA_DIR` and set the ouput to `ADNI_OUT_DIR`
 4. Record the dataset version and download date.
 5. Run `cohort_MCI_bl.py` → `modality_availability.py`.
 
